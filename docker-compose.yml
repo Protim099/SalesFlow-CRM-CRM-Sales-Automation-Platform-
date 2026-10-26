@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: salesflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-salesflow}
+      POSTGRES_DB: salesflow
+    volumes: [pgdata:/var/lib/postgresql/data]
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U salesflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    ports: ["3000:3000"]
+    environment:
+      DATABASE_URL: postgresql://salesflow:${POSTGRES_PASSWORD:-salesflow}@db:5432/salesflow?schema=public
+      AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET (openssl rand -base64 48)}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      CRON_SECRET: ${CRON_SECRET:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      EMAIL_FROM: ${EMAIL_FROM:-SalesFlow CRM <no-reply@salesflow.local>}
+
+volumes:
+  pgdata:
