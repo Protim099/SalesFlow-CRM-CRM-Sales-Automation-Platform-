@@ -1,52 +1,82 @@
-"use server";
-import bcrypt from "bcryptjs";
-import { prisma } from "@/lib/db";
-import { safe, AppError } from "@/lib/errors";
-import { createSession, destroySession, clientIp } from "@/lib/auth";
-import { loginSchema, registerSchema } from "@/lib/validators";
-import { rateLimit } from "@/lib/rate-limit";
-import { audit } from "@/lib/audit";
-import { defaultSources, defaultStageRows } from "@/lib/defaults";
-import { slugify } from "@/lib/utils";
+import { cookies, headers } from "next/headers";
+import { redirect } from "next/navigation";
+import { cache } from "react";
+import { SignJWT, jwtVerify } from "jose";
+import { prisma } from "./db";
+import { AppError } from "./errors";
+import { can, type Permission } from "./permissions";
+import type { Role } from "./constants";
 
-const DUMMY_HASH = "$2a$12$C6UzMDM.H6dfI/f/IKcEeO5y9RQ1bq0b6pS1d5wEoYb8ZP1u2yN1e";
+export const SESSION_COOKIE = "sf_session";
+const MAX_AGE = 60 * 60 * 24 * 7;
 
-export async function loginAction(input: { email: string; password: string }) {
-  return safe(async () => {
-    const d = loginSchema.parse(input);
-    const email = d.email.toLowerCase();
-    rateLimit(`login:${clientIp()}:${email}`, 8, 15 * 60_000);
-    const user = await prisma.user.findUnique({ where: { email } });
-    const valid = await bcrypt.compare(d.password, user?.passwordHash ?? DUMMY_HASH); // constant-ish time
-    if (!user || !valid) throw new AppError("Invalid email or password.");
-    const m = await prisma.membership.findFirst({ where: { userId: user.id, active: true }, orderBy: { createdAt: "asc" } });
-    if (!m) throw new AppError("Your account is deactivated. Contact your administrator.");
-    await createSession(user.id, m.orgId);
-    audit(m.orgId, user.id, "auth.login", "user", user.id);
-  });
+function secret() {
+  const s = process.env.AUTH_SECRET;
+  if (!s || s.length < 32) throw new Error("AUTH_SECRET must be set to a random string of at least 32 characters.");
+  return new TextEncoder().encode(s);
 }
 
-export async function registerAction(input: { orgName: string; name: string; email: string; password: string }) {
-  return safe(async () => {
-    const d = registerSchema.parse(input);
-    rateLimit(`register:${clientIp()}`, 5, 60 * 60_000);
-    const email = d.email.toLowerCase();
-    if (await prisma.user.findUnique({ where: { email } })) throw new AppError("An account with this email already exists.");
-    const passwordHash = await bcrypt.hash(d.password, 12);
-    const base = slugify(d.orgName);
-    const slug = (await prisma.organization.findUnique({ where: { slug: base } })) ? `${base}-${Math.random().toString(36).slice(2, 6)}` : base;
-    const { orgId, userId } = await prisma.$transaction(async (tx) => {
-      const org = await tx.organization.create({ data: { name: d.orgName, slug, leadSources: defaultSources() } });
-      const user = await tx.user.create({ data: { email, name: d.name, passwordHash } });
-      await tx.membership.create({ data: { userId: user.id, orgId: org.id, role: "ADMIN" } });
-      await tx.dealStage.createMany({ data: defaultStageRows(org.id) });
-      return { orgId: org.id, userId: user.id };
-    });
-    await createSession(userId, orgId);
-    audit(orgId, userId, "org.create", "organization", orgId);
-  });
+export type Session = {
+  userId: string; name: string; email: string; emailNotifications: boolean;
+  orgId: string; role: Role;
+  org: { id: string; name: string; currency: string; timezone: string; monthlyTarget: number; leadSources: string[] };
+};
+
+export async function createSession(userId: string, orgId: string) {
+  const token = await new SignJWT({ uid: userId, oid: orgId }).setProtectedHeader({ alg: "HS256" }).setIssuedAt().setExpirationTime(`${MAX_AGE}s`).sign(secret());
+  cookies().set(SESSION_COOKIE, token, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: MAX_AGE });
+}
+export const destroySession = () => cookies().delete(SESSION_COOKIE);
+
+/** Verifies the signed cookie AND re-checks the membership in the DB, so role changes/deactivation apply immediately. */
+export const getSession = cache(async (): Promise<Session | null> => {
+  const token = cookies().get(SESSION_COOKIE)?.value;
+  if (!token) return null;
+  let uid: string, oid: string;
+  try {
+    const { payload } = await jwtVerify(token, secret());
+    uid = String(payload.uid); oid = String(payload.oid);
+  } catch { return null; }
+  const m = await prisma.membership.findFirst({ where: { userId: uid, orgId: oid, active: true }, include: { user: true, org: true } });
+  if (!m) return null;
+  return {
+    userId: m.user.id, name: m.user.name, email: m.user.email, emailNotifications: m.user.emailNotifications,
+    orgId: m.orgId, role: m.role as Role,
+    org: { id: m.org.id, name: m.org.name, currency: m.org.currency, timezone: m.org.timezone, monthlyTarget: m.org.monthlyTarget, leadSources: m.org.leadSources },
+  };
+});
+
+export async function requireSession(): Promise<Session> {
+  const s = await getSession();
+  if (!s) redirect("/login");
+  return s;
+}
+export async function requirePermission(p: Permission): Promise<Session> {
+  const s = await requireSession();
+  if (!can(s.role, p)) throw new AppError("You don't have permission to do that.");
+  return s;
 }
 
-export async function logoutAction() {
-  destroySession();
+/** Row-level scope: reps only see records they own; managers/admins see the whole organization. */
+export const ownScope = (s: Session, field: "assignedToId" | "ownerId" | "assigneeId") =>
+  can(s.role, "records:viewAll") ? { orgId: s.orgId } : { orgId: s.orgId, [field]: s.userId };
+
+export function clientIp() {
+  const h = headers();
+  return h.get("x-forwarded-for")?.split(",")[0]?.trim() || h.get("x-real-ip") || "unknown";
+}
+
+/** CSRF defence for route handlers: state-changing requests must come from our own origin. */
+export function assertSameOrigin(req: Request) {
+  const origin = req.headers.get("origin");
+  if (!origin) return; // non-browser clients / same-origin GET navigations
+  const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");
+  if (!host || new URL(origin).host !== host) throw new AppError("Cross-origin request blocked.");
+}
+
+/** For pages: redirect (instead of throwing) when the role lacks access. */
+export async function requirePageAccess(p: Permission): Promise<Session> {
+  const s = await requireSession();
+  if (!can(s.role, p)) redirect("/dashboard");
+  return s;
 }
