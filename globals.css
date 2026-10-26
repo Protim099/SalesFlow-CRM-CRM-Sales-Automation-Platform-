@@ -1,0 +1,34 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 20% 98%; --foreground: 224 30% 12%;
+    --card: 0 0% 100%; --card-foreground: 224 30% 12%;
+    --primary: 243 75% 59%; --primary-foreground: 0 0% 100%;
+    --secondary: 226 30% 95%; --secondary-foreground: 224 30% 20%;
+    --muted: 226 25% 95%; --muted-foreground: 224 10% 42%;
+    --accent: 238 80% 96%; --accent-foreground: 243 70% 45%;
+    --destructive: 0 72% 51%; --destructive-foreground: 0 0% 100%;
+    --border: 226 20% 90%; --input: 226 20% 88%; --ring: 243 75% 59%;
+  }
+  .dark {
+    --background: 228 28% 8%; --foreground: 220 20% 95%;
+    --card: 228 24% 11%; --card-foreground: 220 20% 95%;
+    --primary: 238 83% 67%; --primary-foreground: 228 28% 8%;
+    --secondary: 228 20% 16%; --secondary-foreground: 220 20% 92%;
+    --muted: 228 20% 15%; --muted-foreground: 220 10% 62%;
+    --accent: 238 40% 20%; --accent-foreground: 238 90% 85%;
+    --destructive: 0 70% 55%; --destructive-foreground: 0 0% 100%;
+    --border: 228 18% 19%; --input: 228 18% 22%; --ring: 238 83% 67%;
+  }
+  * { @apply border-border; }
+  body { @apply bg-background text-foreground antialiased; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+}
+@layer components {
+  .table-base { @apply w-full text-sm; }
+  .table-base th { @apply whitespace-nowrap px-4 py-3 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground; }
+  .table-base td { @apply px-4 py-3 align-middle; }
+  .table-base tbody tr { @apply border-t transition-colors hover:bg-muted/50; }
+}
